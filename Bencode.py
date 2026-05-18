@@ -44,7 +44,7 @@ def bdecode(data):
                 if isinstance(key, bytes):
                     try:
                         key = key.decode('utf-8')
-                    except:
+                    except UnicodeDecodeError:
                         pass # keep as bytes if the decoding fails in some way
                 result[key] = value
             return result, index + 1
