@@ -147,7 +147,7 @@ class TrackerServer:
 
 
         print(f'Tracker started on host: {self.host} port:{self.port}')
-        print(f'Accounce url: http://{self.host}:{self.port}/announce')
+        print(f'Announce url: http://{self.host}:{self.port}/announce')
         print(f'Status url: http://{self.host}:{self.port}/stats')
         try:
             self.server.serve_forever()
