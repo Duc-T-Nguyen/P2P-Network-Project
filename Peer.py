@@ -74,22 +74,29 @@ class Peer:
             traceback.print_exc()
         finally: 
             self.close()
+    def recv_exactly(self, num_bytes):
+        data = b''
+        while len(data) < num_bytes:
+            chunk = self.socket.recv(num_bytes-len(data))
+            if not chunk:
+                return None
+            data += chunk
+        return data
     def receive_message(self):
         try: 
-            byte_length = self.socket.recv(4)
-            if len(byte_length) < 4:
+            byte_length = self.recv_exactly(4)
+            if byte_length is None or len(byte_length) < 4:
                 return None, None
             length = struct.unpack('>I', byte_length)[0]
             if length == 0:
                 return 'keep_alive', None
-            message_type_byte = self.socket.recv(1)
-            if len(message_type_byte) < 1:
+            message_type_byte = self.recv_exactly(1)
+            if message_type_byte is None or len(message_type_byte) < 1:
                 return None, None
-            
             type = message_type_byte[0]
             payload = b''
-            if length > 1:
-                payload = self.socket.recv(length -1)
+            if length>1:
+                payload = self.recv_exactly(length - 1) or b''
             return type, payload
         except socket.timeout:
             return 'keep_alive', None
@@ -273,7 +280,7 @@ class PieceManager:
     def add_block(self, index, off, block):
         with self.lock:
             if self.pieces[index] is None:
-                p_size = self.get_size(index) 
+                p_size = self.torrent.get_piece_size(index)
                 self.pieces[index] = bytearray(p_size)
             
             end_offset = off +len(block)
