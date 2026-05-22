@@ -18,7 +18,7 @@ Framework Implementation and Architecture:
 Instructions to Run Project: 
 - Note that I put in python3 for the commands because i use a macos but if you want to execute these commands on non macs you have to use python
 Tracker.py 
-    - To start the Tracker Server in the Tracker.py file with its default port of 3000:
+    - To start the Tracker Server in the Tracker.py file with its default port of 8080:
         - execute command:
             - python3 Tracker.py 
     - To execute with a special port:
@@ -26,9 +26,9 @@ Tracker.py
             - python3 Tracker.py (port number)
 
     - The result if you execute with its default port:
-        Tracker started on host: 0.0.0.0 port:3000
-        Announce url: http://localhost:3000/announce
-        Status url: http://localhost:3000/stats
+        Tracker started on host: 0.0.0.0 port:8080
+        Announce url: http://localhost:8080/announce
+        Status url: http://localhost:8080/stats
 
 Torrent.py:
     - To Create a Torrent File (this creates a generic txt and Torrent file: TestFile.txt and TestFile.txt.torrent): 
