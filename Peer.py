@@ -12,7 +12,9 @@ from urllib.parse import urlencode
 from Bencode import bdecode
 
 
+# ---------------------------------------------------------------------------
 # Peer  –  handles one P2P connection
+# ---------------------------------------------------------------------------
 
 class Peer:
     def __init__(self, ip, port, info, peer_id, client, manager):
@@ -203,6 +205,10 @@ class Peer:
 # ---------------------------------------------------------------------------
 
 class MultiFilePieceManager:
+    """
+    Works for both single-file and multi-file torrents.
+    Each piece is verified with SHA-1 then written to the correct file(s).
+    """
 
     def __init__(self, torrent, output_dir='.', progress_callback=None):
         """
@@ -236,18 +242,26 @@ class MultiFilePieceManager:
         self._file_handles = {}
         self._prep_files()
 
+    # ------------------------------------------------------------------
     # File preparation
+    # ------------------------------------------------------------------
 
     def _prep_files(self):
         for fi in self._file_info:
             full_path = os.path.join(self.output_dir, fi['path'])
-            os.makedirs(os.path.dirname(full_path) if os.path.dirname(full_path) else '.', exist_ok=True)
+            parent = os.path.dirname(full_path)
+            if parent and parent != '.' and not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
             if not os.path.exists(full_path):
                 with open(full_path, 'wb') as fh:
                     if fi['length'] > 0:
                         fh.seek(fi['length'] - 1)
                         fh.write(b'\x00')
             self._file_handles[fi['path']] = open(full_path, 'r+b')
+
+    # ------------------------------------------------------------------
+    # Public interface (same as original PieceManager for Peer compat)
+    # ------------------------------------------------------------------
 
     def have(self, index):
         with self.lock:
@@ -357,7 +371,9 @@ class MultiFilePieceManager:
             except Exception:
                 pass
 
+    # ------------------------------------------------------------------
     # Internal helpers
+    # ------------------------------------------------------------------
 
     def _is_complete(self, index):
         if self.pieces[index] is None:
@@ -444,7 +460,9 @@ class MultiFilePieceManager:
 PieceManager = MultiFilePieceManager
 
 
+# ---------------------------------------------------------------------------
 # BitTorrentClient
+# ---------------------------------------------------------------------------
 
 class BitTorrentClient:
     def __init__(self, torrent_path, output_dir=None, progress_callback=None):
@@ -482,6 +500,9 @@ class BitTorrentClient:
             progress_callback=self.progress_callback,
         )
 
+        # Verify any existing files so seeders are detected correctly
+        self._verify_existing_files()
+
         self._start_server()
         peers = self._contact_tracker('started')
         if not peers:
@@ -489,6 +510,58 @@ class BitTorrentClient:
             return
         self._connect_to_peers(peers)
         self._monitor()
+
+    def _verify_existing_files(self):
+        """Check each file on disk and mark pieces that already pass SHA-1."""
+        pm = self.piece_manager
+        all_files = self.torrent.files()
+        # Check every file exists and has correct size before verifying
+        for fi in all_files:
+            full_path = os.path.join(self.output_dir, fi['path'])
+            if not os.path.exists(full_path):
+                return
+            if os.path.getsize(full_path) != fi['length']:
+                return
+
+        print("Existing files found — verifying pieces...")
+        verified = 0
+        for index in range(pm.num_pieces):
+            piece_size = self.torrent.get_piece_size(index)
+            abs_offset = index * self.torrent.piece_length()
+            piece_data = bytearray(piece_size)
+            remaining = piece_size
+            local_off = 0
+
+            for fi in all_files:
+                f_start = fi['offset']
+                f_end = fi['offset'] + fi['length']
+                p_start = abs_offset + local_off
+                if p_start >= f_end:
+                    continue
+                if f_start >= abs_offset + piece_size:
+                    break
+                file_seek = max(p_start - f_start, 0)
+                piece_byte_start = max(f_start - abs_offset, 0)
+                can_read = min(piece_size - piece_byte_start, fi['length'] - file_seek)
+                if can_read <= 0:
+                    continue
+                full_path = os.path.join(self.output_dir, fi['path'])
+                with open(full_path, 'rb') as fh:
+                    fh.seek(file_seek)
+                    chunk = fh.read(can_read)
+                piece_data[piece_byte_start:piece_byte_start + len(chunk)] = chunk
+                local_off += len(chunk)
+
+            import hashlib
+            if hashlib.sha1(bytes(piece_data)).digest() == self.torrent.get_piece_hash(index):
+                with pm.lock:
+                    pm.piece_status[index] = True
+                verified += 1
+
+        total = pm.num_pieces
+        print(f"Verified {verified}/{total} pieces")
+        if verified == total:
+            print("Complete file — will act as seeder!")
 
     def _start_server(self):
         def _serve():
@@ -550,25 +623,32 @@ class BitTorrentClient:
                 pass
 
     def _contact_tracker(self, event):
-        info_hash_encoded = ''.join(f'%{b:02x}' for b in self.torrent.info)
         try:
-            params = {
-                'peer_id': self.peer_id.decode('latin-1'),
-                'port': self.port,
-                'uploaded': 0,
-                'downloaded': 0,
-                'left': self.torrent.file_length(),
-                'event': event,
-                'compact': 0,
-            }
             announce = self.torrent.announce()
             if isinstance(announce, bytes):
                 announce = announce.decode('utf-8')
-            url = announce + '?info_hash=' + info_hash_encoded + '&' + urlencode(params)
+            info_hash_encoded = ''.join(f'%{b:02x}' for b in self.torrent.info)
+            peer_id_encoded = ''.join(f'%{b:02x}' for b in self.peer_id)
+            query = (
+                f'info_hash={info_hash_encoded}'
+                f'&peer_id={peer_id_encoded}'
+                f'&port={self.port}'
+                f'&uploaded=0'
+                f'&downloaded=0'
+                f'&left={self.torrent.file_length()}'
+                f'&event={event}'
+                f'&compact=0'
+            )
+            url = announce + '?' + query
+            print(f"Contacting tracker: {url}")
             resp = requests.get(url, timeout=10)
+            print(f"Tracker status: {resp.status_code}")
+            print(f"Tracker response: {resp.content[:200]}")
             if resp.status_code == 200:
                 decoded = bdecode(resp.content)
-                return decoded.get('peers', [])
+                peers = decoded.get('peers', [])
+                print(f"Peers received: {peers}")
+                return peers
         except Exception as e:
             print(f"Tracker error: {e}")
         return []
@@ -628,7 +708,9 @@ class BitTorrentClient:
             self.piece_manager.close()
 
 
+# ---------------------------------------------------------------------------
 # CLI entry point
+# ---------------------------------------------------------------------------
 
 def main():
     if len(sys.argv) < 2:
@@ -640,7 +722,15 @@ def main():
         print(f"File not found: {torrent_file}")
         sys.exit(1)
 
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else '.'
+    output_dir = '.'
+    if len(sys.argv) > 2:
+        arg = sys.argv[2]
+        # If arg is an existing file, use its parent dir; otherwise treat as dir
+        if os.path.isfile(arg):
+            output_dir = os.path.dirname(os.path.abspath(arg)) or '.'
+        else:
+            output_dir = arg
+
     client = BitTorrentClient(torrent_file, output_dir=output_dir)
     client.start()
 
